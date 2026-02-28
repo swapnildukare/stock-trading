@@ -4,8 +4,21 @@ on:
   # 4:00 PM IST = 10:30 AM UTC, weekdays
   schedule:
     - cron: "30 10 * * 1-5"
-  # Allow manual trigger from the Actions tab
+  # Manual trigger — backfill by lookback days or explicit date range
   workflow_dispatch:
+    inputs:
+      lookback_days:
+        description: "Lookback days from today (ignored if from_date is set)"
+        required: false
+        default: "1"
+      from_date:
+        description: "Start date YYYY-MM-DD (overrides lookback_days)"
+        required: false
+        default: ""
+      to_date:
+        description: "End date YYYY-MM-DD (default: today)"
+        required: false
+        default: ""
 
 jobs:
   run-pipeline:
@@ -33,7 +46,30 @@ jobs:
 
       - name: Run swing pipeline
         working-directory: swing_trading_1
-        run: uv run python -m src.pipeline
+        run: |
+          # Cron runs: no inputs, pipeline auto-catchup handles it (no extra args needed)
+          # Manual runs: build --from / --to from inputs
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # Resolve to_date (default: today)
+            TO="${{ inputs.to_date }}"
+            if [ -z "$TO" ]; then
+              TO=$(date -u +%Y-%m-%d)
+            fi
+
+            # Resolve from_date (explicit wins over lookback_days)
+            FROM="${{ inputs.from_date }}"
+            if [ -z "$FROM" ]; then
+              DAYS="${{ inputs.lookback_days }}"
+              FROM=$(date -u -d "$TO - ${DAYS} days" +%Y-%m-%d 2>/dev/null \
+                  || date -u -v-${DAYS}d +%Y-%m-%d)   # macOS fallback
+            fi
+
+            echo "Running pipeline from $FROM to $TO"
+            uv run python -m src.pipeline --from "$FROM" --to "$TO"
+          else
+            # Scheduled run — no args, pipeline auto-calculates missing dates
+            uv run python -m src.pipeline
+          fi
 
       - name: Commit updated DuckDB
         run: |
