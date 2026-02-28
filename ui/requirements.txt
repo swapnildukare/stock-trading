@@ -1,5 +1,12 @@
-# Streamlit Community Cloud reads this file (it does not support [dependency-groups]).
-# Main project deps (yfinance, duckdb, pandas, etc.) are declared in pyproject.toml
-# and installed automatically by Streamlit Cloud via pip install .
+# Streamlit Cloud reads this file — list all packages the dashboard needs.
+# Core pipeline deps (also in pyproject.toml [project].dependencies)
+yfinance>=0.2.50
+pandas>=2.2.0
+requests>=2.32.0
+duckdb>=1.1.0
+polars>=1.0.0
+pydantic>=2.7.0
+pyarrow>=16.0.0
+# UI deps (also in pyproject.toml [dependency-groups].ui)
 streamlit>=1.35.0
 plotly>=5.20.0
