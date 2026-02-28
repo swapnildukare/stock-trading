@@ -38,3 +38,4 @@ build/
 # Logs / temp
 *.log
 *.tmp
+swing_trading_1/logs/

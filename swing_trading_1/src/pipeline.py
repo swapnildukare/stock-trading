@@ -45,9 +45,10 @@ from config import (
     IMPULSE_THRESHOLD, CONSOLIDATION_DAYS,
     STABLE_MAX_UP_PCT, STABLE_MAX_DOWN_PCT,
 )
-from src.nse_fetcher import resolve_tickers
+from src.logger import setup_logging, get_logger
+from src.nse_fetcher import resolve_tickers, filter_trading_days
 from src.models import RunLog, ImpulseSignal
-from src.fetcher import fetch_candles
+from src.fetcher import fetch_candles, fetch_candles_range
 from src.db import (
     get_conn, upsert_candles, upsert_impulses, log_run, get_missing_dates,
     write_funnel_snapshots,
@@ -56,9 +57,11 @@ from src.impulse_finder import find_impulses
 from src.conditions import StabilityCondition, VolumeCondition
 from src.funnel_processor import compute_funnel_state, print_tracker
 
-_W   = 56                  # output width
-_SEP = "━" * _W             # heavy separator line used at section boundaries
-_sep = "─" * _W             # light separator used between dates in multi-date runs
+log = get_logger(__name__)
+
+_W   = 56
+_SEP = "━" * _W
+_sep = "─" * _W
 
 
 def get_tickers() -> tuple[list[str], str]:
@@ -79,24 +82,42 @@ _CONDITIONS = [
 ]
 
 
-def process_date(conn, trade_date: date, tickers: list[str], multi: bool = False) -> tuple[RunLog, int, int]:
+def process_date(
+    conn,
+    trade_date: date,
+    tickers: list[str],
+    candles_prefetched: bool = False,
+) -> tuple[RunLog, int, int]:
     """
     Ingest + impulse detection + funnel snapshot for one trading date.
+
+    Parameters
+    ----------
+    candles_prefetched : bool
+        When True, skip the yfinance fetch — candles are already in the DB
+        (bulk-loaded by the caller via fetch_candles_range).
+
     Returns (RunLog, watchlist_count, fallout_count).
     """
-    if multi:
-        print(f"  {_sep}")
-    print(f"  {trade_date}")
+    log.info("─" * 48)
+    log.info("processing date: %s", trade_date)
     try:
-        # Step 1: ingest candles
-        records         = fetch_candles(tickers, trade_date, lookback_days=1, interval=INTERVAL)
-        candles_written = upsert_candles(conn, records)
-        print(f"    candles    {candles_written:>5}  ingested")
+        # Step 1: ingest candles (skipped when caller bulk-loaded them)
+        if candles_prefetched:
+            candles_written = conn.execute(
+                "SELECT COUNT(*) FROM candles WHERE DATE(datetime) = ? AND interval = ?",
+                [trade_date, INTERVAL],
+            ).fetchone()[0]
+            log.info("  candles    %5d  (pre-loaded)", candles_written)
+        else:
+            records         = fetch_candles(tickers, trade_date, lookback_days=1, interval=INTERVAL)
+            candles_written = upsert_candles(conn, records)
+            log.info("  candles    %5d  ingested", candles_written)
 
         # Step 2: detect impulses
         signals        = find_impulses(conn, trade_date, IMPULSE_THRESHOLD, INTERVAL)
         impulses_found = upsert_impulses(conn, signals)
-        print(f"    impulses   {impulses_found:>5}  detected  (≥ {IMPULSE_THRESHOLD}%)")
+        log.info("  impulses   %5d  detected  (≥ %s%%)", impulses_found, IMPULSE_THRESHOLD)
 
         # Step 3: compute funnel snapshots
         import datetime as dt
@@ -119,8 +140,8 @@ def process_date(conn, trade_date: date, tickers: list[str], multi: bool = False
         snaps_written   = write_funnel_snapshots(conn, snapshots)
         watchlist_count = sum(1 for s in snapshots if s.state.value == "watchlist")
         fallout_count   = sum(1 for s in snapshots if s.state.value == "fallout")
-        print(f"    snapshots  {snaps_written:>5}  written    "
-              f"({watchlist_count} watchlist · {fallout_count} fallout)")
+        log.info("  snapshots  %5d  written  (%d watchlist · %d fallout)",
+                 snaps_written, watchlist_count, fallout_count)
 
         return (
             RunLog(
@@ -132,7 +153,7 @@ def process_date(conn, trade_date: date, tickers: list[str], multi: bool = False
             watchlist_count, fallout_count,
         )
     except Exception as e:
-        print(f"    ERROR: {e}")
+        log.error("  FAILED on %s: %s", trade_date, e, exc_info=True)
         return (
             RunLog(
                 run_date=trade_date, status="failed",
@@ -143,43 +164,64 @@ def process_date(conn, trade_date: date, tickers: list[str], multi: bool = False
         )
 
 
-def run(from_date: date, to_date: date, force: bool = False) -> None:
+def run(from_date: date, to_date: date, force: bool = False, log_path: Path | None = None) -> None:
     t_start  = time.time()
     conn     = get_conn(DB_PATH)
     tickers, source = get_tickers()
 
     date_range = str(from_date) if from_date == to_date else f"{from_date} → {to_date}"
 
-    print(_SEP)
-    print(f"  SWING PIPELINE  ·  {date_range}")
-    print(f"  {len(tickers)} tickers  ·  {source}  ·  interval {INTERVAL}")
-    print(_SEP)
+    log.info("━" * 48)
+    log.info("SWING PIPELINE  ·  %s", date_range)
+    log.info("%d tickers  ·  %s  ·  interval %s", len(tickers), source, INTERVAL)
+    log.info("━" * 48)
 
     if force:
         import datetime as dt
         all_dates = []
         d = from_date
         while d <= to_date:
-            if d.weekday() < 5:
-                all_dates.append(d)
+            all_dates.append(d)
             d += dt.timedelta(days=1)
-        missing = all_dates
-        print(f"  --force: reprocessing {len(missing)} date(s) regardless of run_log")
+        missing, skipped = filter_trading_days(all_dates)
+        log.info("--force: %d trading day(s) to reprocess", len(missing))
     else:
-        missing = get_missing_dates(conn, from_date, to_date)
+        raw_missing = get_missing_dates(conn, from_date, to_date)
+        missing, skipped = filter_trading_days(raw_missing)
+
+    for skip_date, reason in skipped:
+        log.info("⏭  skipping %s — %s", skip_date, reason)
 
     if not missing:
-        print("  Nothing to do — all dates already processed.")
-        print(_SEP)
+        log.info("Nothing to do — all dates already processed.")
         conn.close()
+        # Summary
+        print(_SEP)
+        print(f"  SWING PIPELINE  ·  {date_range}")
+        print(f"  Nothing to do — all dates already processed.")
+        print(_SEP)
         return
+
+    # ── Bulk candle fetch ────────────────────────────────────────────────────
+    # One yfinance API call covers the full date range instead of N calls in
+    # the per-date loop.  Falls back to per-date fetching on error.
+    bulk_loaded = False
+    if len(missing) > 1:
+        log.info("bulk fetching candles: %s → %s  (%d dates, %d tickers)",
+                 missing[0], missing[-1], len(missing), len(tickers))
+        try:
+            all_records   = fetch_candles_range(tickers, missing[0], missing[-1], INTERVAL)
+            total_bulk    = upsert_candles(conn, all_records)
+            bulk_loaded   = True
+            log.info("bulk upsert complete: %d candle rows written", total_bulk)
+        except Exception as exc:
+            log.warning("bulk fetch failed (%s) — falling back to per-date fetching", exc)
 
     total_impulses  = 0
     total_watchlist = 0
-    multi           = len(missing) > 1
 
     for d in missing:
-        run_log, wl, fo = process_date(conn, d, tickers, multi=multi)
+        run_log, wl, fo = process_date(conn, d, tickers, candles_prefetched=bulk_loaded)
         log_run(conn, run_log)
         total_impulses  += run_log.impulses_found
         total_watchlist += wl
@@ -187,15 +229,30 @@ def run(from_date: date, to_date: date, force: bool = False) -> None:
     print_tracker(conn, consolidation_days=CONSOLIDATION_DAYS, as_of=missing[-1])
 
     elapsed = time.time() - t_start
+    log.info("━" * 48)
+    log.info("Done · %d date(s) · %d impulses · %d watchlist · %.1fs",
+             len(missing), total_impulses, total_watchlist, elapsed)
+
+    conn.close()
+
+    fetch_mode = "bulk fetch" if bulk_loaded else "per-date fetch"
+
+    # ── stdout summary ───────────────────────────────────────────────────────
     print(_SEP)
+    print(f"  SWING PIPELINE  ·  {date_range}")
+    print(f"  {len(tickers)} tickers  ·  {source}  ·  {fetch_mode}")
+    print(_sep)
+    if skipped:
+        print(f"  ⏭  {len(skipped)} date(s) skipped (weekends/holidays)")
     print(
-        f"  Done  ·  {len(missing)} date{'s' if len(missing) > 1 else ''} processed"
+        f"  ✅ {len(missing)} date{'s' if len(missing) > 1 else ''} processed"
         f"  ·  {total_impulses} impulses"
         f"  ·  {total_watchlist} watchlist"
         f"  ·  {elapsed:.1f}s"
     )
+    if log_path:
+        print(f"  📄 log → {log_path}")
     print(_SEP)
-    conn.close()
 
 
 def main():
@@ -222,7 +279,10 @@ def main():
     else:
         from_date = date.fromisoformat(args.from_date)
 
-    run(from_date, to_date, force=args.force)
+    log_path = setup_logging(from_date)
+    log.info("pipeline started  from=%s  to=%s  force=%s", from_date, to_date, args.force)
+
+    run(from_date, to_date, force=args.force, log_path=log_path)
 
 
 if __name__ == "__main__":

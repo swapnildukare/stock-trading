@@ -20,10 +20,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config import WATCHLIST, NSE_INDEX, INTERVAL
+from src.logger import setup_logging, get_logger
 from src.nse_fetcher import resolve_tickers
 from src.models import IngestionConfig
 from src.fetcher import fetch_candles
 from src.db import get_conn, upsert_candles
+
+log = get_logger(__name__)
 
 
 def build_config(args: argparse.Namespace) -> IngestionConfig:
@@ -38,17 +41,18 @@ def build_config(args: argparse.Namespace) -> IngestionConfig:
 
 
 def run(cfg: IngestionConfig) -> None:
-    print(f"[ingestor] {cfg.end_date}  lookback={cfg.lookback_days}d  "
-          f"interval={cfg.interval}  tickers={len(cfg.tickers)}")
+    log.info("ingestor start  date=%s  lookback=%dd  interval=%s  tickers=%d",
+             cfg.end_date, cfg.lookback_days, cfg.interval, len(cfg.tickers))
 
     records = fetch_candles(cfg.tickers, cfg.end_date, cfg.lookback_days, cfg.interval)
-    print(f"[ingestor] Fetched {len(records)} candles")
+    log.info("fetched %d candles", len(records))
 
     conn = get_conn(cfg.db_path)
     written = upsert_candles(conn, records)
     conn.close()
 
-    print(f"[ingestor] Written {written} rows → {cfg.db_path}")
+    log.info("written %d rows → %s", written, cfg.db_path)
+    print(f"[ingestor] {cfg.end_date}  {written} rows written → {cfg.db_path}")
 
 
 def main():
@@ -60,6 +64,7 @@ def main():
     parser.add_argument("--db-path",  default="data/market.duckdb",     help="DuckDB file path")
     args = parser.parse_args()
 
+    setup_logging(date.fromisoformat(args.date))
     cfg = build_config(args)
     run(cfg)
 
