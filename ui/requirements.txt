@@ -1,0 +1,5 @@
+# Streamlit Community Cloud reads this file (it does not support [dependency-groups]).
+# Main project deps (yfinance, duckdb, pandas, etc.) are declared in pyproject.toml
+# and installed automatically by Streamlit Cloud via pip install .
+streamlit>=1.35.0
+plotly>=5.20.0
