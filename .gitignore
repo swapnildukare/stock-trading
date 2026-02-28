@@ -14,12 +14,12 @@ env/
 # uv
 .uv/
 
-# DuckDB data — ignore scratch files but keep the database
-data/*
-!data/*.duckdb
+# DuckDB data — ignore scratch/WAL files but keep the database
+swing_trading_1/data/*
+!swing_trading_1/data/*.duckdb
 
 # Backtest reports (generated output)
-backtest/reports/
+swing_trading_1/backtest/reports/
 
 # Distribution / packaging
 *.egg-info/
