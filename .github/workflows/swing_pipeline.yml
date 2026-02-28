@@ -1,0 +1,46 @@
+name: Swing Pipeline
+
+on:
+  # 4:00 PM IST = 10:30 AM UTC, weekdays
+  schedule:
+    - cron: "30 10 * * 1-5"
+  # Allow manual trigger from the Actions tab
+  workflow_dispatch:
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          # Full history needed so git push works cleanly
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install yfinance pandas requests "duckdb>=1.1.0" polars pydantic pyarrow
+
+      - name: Run swing pipeline
+        working-directory: swing_trading_1
+        run: python -m src.pipeline
+
+      - name: Commit updated DuckDB
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add swing_trading_1/data/market.duckdb
+          # Only commit if there are actual changes
+          git diff --cached --quiet && echo "No DB changes" || \
+            git commit -m "chore: update market.duckdb $(date -u +'%Y-%m-%d') [skip ci]"
+
+      - name: Push changes
+        uses: ad-m/github-push-action@v0.8.0
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          branch: ${{ github.ref_name }}

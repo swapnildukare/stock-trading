@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+trader/
+.venv/
+venv/
+env/
+
+# uv
+.uv/
+
+# DuckDB data — ignore scratch files but keep the database
+data/*
+!data/*.duckdb
+
+# Backtest reports (generated output)
+backtest/reports/
+
+# Distribution / packaging
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# Logs / temp
+*.log
+*.tmp
